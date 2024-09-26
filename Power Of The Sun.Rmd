@@ -1,0 +1,200 @@
+---
+title: "Power Of The Sun"
+author: "Ken Miseda"
+date: "2024-09-26"
+output: html_document
+---
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(stats)
+library(finalfit) 
+library(naniar)
+library(jtools)
+library(sjPlot)
+library(corrplot)
+library(GGally)
+library(mice)
+library(fastDummies)
+library(lares)
+library(randomForest)
+library(caret)
+library(lubridate)
+library(reshape2)
+
+```
+
+
+```{r}
+#loading the weather  data
+weatheradata <- read.csv("Weather_and_energy_Final_2020_2021.csv")
+
+#exploratory analysis< variable summery 
+print(summary(weatheradata))
+print(str(weatheradata))
+
+```
+```{r}
+#visualizing the missing values 
+
+gg_miss_var(weatheradata) +
+  labs(title = "Missing Values Plot",
+       x = "Variables", 
+       y = "No. of Missing Values" )
+
+#tabulating the missing values by percentage
+NA_values <- weatheradata %>%
+  miss_var_summary()
+
+print(NA_values) 
+
+```
+
+
+```{r}
+# Imputing NA values using mice prediction 
+
+weatheradata_temp <- mice(weatheradata,m=3, 
+                          maxit=50, 
+                          meth='rf', 
+                          seed=500, 
+                          printFlag = FALSE)
+
+imputed_weatheradata <- complete(weatheradata_temp,1)
+
+#Select numerical variables 
+imputed_weatheradata_numeric <- imputed_weatheradata %>%
+  select(Energy.Discharged..Wh., Maximum.Temperature, 
+         Minimum.Temperature, Temperature, Wind.Chill, 
+          Heat.Index, Precipitation,Snow,Snow.Depth,Wind.Speed,Wind.Direction, 
+          Wind.Gust, Visibility, Cloud.Cover, Relative.Humidity ) 
+
+#pivot the numerical variables to long 
+imputed_weatheradata_numeric_lng <- pivot_longer(imputed_weatheradata_numeric, 
+                                        names_to = 'names', 
+                                        values_to = 'values',1:15 )
+
+#plotting distribution fater NA imputation 
+ggplot(imputed_weatheradata_numeric_lng, aes(x = values, 
+                                    color = names)) +
+  facet_wrap(~names, 
+             scales = 'free') +
+  geom_histogram(bins = 20, 
+                 color = 'black', 
+                 fill = 'lightblue') +
+    labs(title = "Distribution after Imputation with Mice Rf ",
+ )
+
+
+```
+```{r}
+# Create dummy variables:one-hot encode 
+imputed_weatheradata_dummy <- dummy_cols(imputed_weatheradata, 
+                                         select_columns = 'Conditions')
+
+
+
+# Remove columns using select()
+imputed_WD_dummy_DF <- imputed_weatheradata_dummy %>% select(-c(Name, 
+                                                                Date.time, 
+                                                                Conditions,
+                                                                Wind.Chill))
+#renaming dummy variables 
+imputed_WD_dummy_DF <- imputed_WD_dummy_DF %>% 
+        rename( "Cond_Partially_cloudy" = "Conditions_Partially cloudy",
+                "Cond_Rain_Partially_cloudy" = "Conditions_Rain, Partially cloudy",
+                "Cond_Snow_Partially_cloudy" = "Conditions_Snow, Partially cloudy")
+
+# correlation plot after one hot encoding 
+corrplot(cor(imputed_WD_dummy_DF), 
+         type = "lower",
+         method = "color",
+         outline = "black")
+```
+
+```{r}
+#top 10 most correlated variables in the data frame with a 5% significance 
+
+corr_cross(imputed_WD_dummy_DF, # name of data set
+  max_pvalue = 0.05, # display only significant correlations (at 5% level)
+  top = 10 # display top 10 couples of variables (by correlation coefficient)
+  )
+
+#display top 6 correlations with  energy generation 
+
+corr_var(imputed_WD_dummy_DF, # name of data set
+  Energy.Discharged..Wh., # name of variable to focus on
+  top = 6  # display top 6 correlations
+)
+
+#subset top six most correlated values 
+
+Subset_WD_DF <- imputed_WD_dummy_DF %>%
+  select(Energy.Discharged..Wh.,Cloud.Cover,
+         Cond_Rain_Partially_cloudy,
+         Conditions_Clear, Relative.Humidity,
+         Visibility, Precipitation)
+
+#correlation plot of the subset variables 
+
+corrplot(cor(Subset_WD_DF), 
+         type = "lower",
+         method = "color",
+         outline = "black")
+
+
+```
+
+```{r}
+#bivariate plots 
+
+ggplot(data = Subset_WD_DF, 
+       mapping = aes(x = Cloud.Cover, 
+                     y = Energy.Discharged..Wh.)) + 
+  geom_point(color = "cornflowerblue", 
+             alpha = .7, 
+             size = 3) + 
+  geom_smooth(method = "lm",
+              color = "red",
+              linewidth =0.5) +
+    labs(title = "Cloud Cover V/s Energy Kwh Plot",
+       x = "Cloud Cover", 
+       y = "Energy Kwh" )
+
+
+ggplot(data = Subset_WD_DF, 
+       mapping = aes(x = Conditions_Clear, 
+                     y = Energy.Discharged..Wh.)) + 
+  geom_point(color = "red", 
+             alpha = .7, 
+             size = 3) + 
+  geom_smooth(method = "lm",
+              se = FALSE) +
+      labs(title = "Clear conditions V/s Energy Kwh ",
+       x = "Clear Conditions", 
+       y = "Energy Kwh" )
+
+
+```
+
+```{r}
+
+#random forest for regression with subset variables(Top 6)
+set.seed(120)
+
+WD.rf <- randomForest(Energy.Discharged..Wh. ~ ., 
+                         data = Subset_WD_DF, 
+                         mtry = 3, 
+                         importance = TRUE) 
+
+print(WD.rf)
+plot(WD.rf)
+
+```
+
+```{r}
+
+```
+
