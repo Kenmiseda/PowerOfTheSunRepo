@@ -2,7 +2,9 @@
 title: "Power Of The Sun"
 author: "Ken Miseda"
 date: "2024-09-26"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 ```{r}
 
@@ -188,13 +190,679 @@ WD.rf <- randomForest(Energy.Discharged..Wh. ~ .,
                          data = Subset_WD_DF, 
                          mtry = 3, 
                          importance = TRUE) 
-
+#Plot and print RF results 
 print(WD.rf)
 plot(WD.rf)
+
+# number of trees with lowest MSE with subset 
+which.min(WD.rf$mse)
+
+# RMSE of this optimal random forest with subset 
+sqrt(WD.rf$mse[which.min(WD.rf$mse)])
+
+```
+```{r}
+#random forest for regression with imputed/whole data frame  
+set.seed(110)
+
+imputed_WD.rf <- randomForest(Energy.Discharged..Wh. ~ ., 
+                         data = imputed_WD_dummy_DF, 
+                         mtry = 3, 
+                         importance = TRUE) 
+
+print(imputed_WD.rf)
+plot(imputed_WD.rf)
+# number of trees with lowest MSE with imputed/whole data frame 
+which.min(imputed_WD.rf$mse)
+# RMSE of this optimal random forest with imputed/whole data frame   
+sqrt(imputed_WD.rf$mse[which.min(imputed_WD.rf$mse)])
+
+```
+
+
+```{r}
+# Get variable importance from the model fit
+ImpData <- as.data.frame(importance(imputed_WD.rf))
+ImpData$Var.Names <- row.names(ImpData)
+
+ImpData <- arrange(ImpData, `%IncMSE`)
+
+#variable importance plot 
+ggplot(ImpData, aes(x=Var.Names, 
+                    y=`%IncMSE`)) +
+  geom_segment( aes(x=Var.Names, 
+                    xend=Var.Names, 
+                    y=0, 
+                    yend=`%IncMSE`), 
+                color="skyblue") +
+  geom_point(aes(size = IncNodePurity), 
+             color="blue", 
+             alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    legend.position="bottom",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+#variable importance table  
+print(ImpData[order(ImpData$`%IncMSE`, 
+                    decreasing = TRUE), ] )
+```
+
+```{r}
+#tuning Random forest with all variables from the whole data set 
+# names of features
+features <- setdiff(names(imputed_WD_dummy_DF), "Energy.Discharged..Wh.")
+
+set.seed(113)
+
+m2 <- tuneRF(
+  x          = imputed_WD_dummy_DF[features],
+  y          = imputed_WD_dummy_DF$Energy.Discharged..Wh.,
+  ntreeTry   = 500,
+  mtryStart  = 5,
+  stepFactor = 0.5,
+  improve    = 0.01,
+  trace      = FALSE      # to not show real-time progress 
+)
+
 
 ```
 
 ```{r}
 
+#Building the final random forest model with optimal hyper parameters
+
+final.grid <-  expand.grid(mtry = 10)
+
+# repeated cv with 10 folds
+control <- trainControl(method = "repeatedcv",
+                        number = 10,
+                        repeats = 50)
+
+
+final.model = train(Energy.Discharged..Wh. ~.,
+              data = imputed_WD_dummy_DF,
+              method = 'rf',
+              tuneGrid = final.grid,
+              trControl = control
+)
+
+print(final.model)
+
 ```
+```{r}
+# Define energy prediction the function
+predict_solar_energy <- function(model, new_data, original_data) {
+  # Step 1: Make predictions using the model
+  pred <- predict(model, newdata = new_data)
+  
+  # Step 2: Round off the predictions
+  pred <- round(pred, digits = 0)
+  
+  # Step 3: Convert predictions to a data frame
+  pred_df <- as.data.frame(pred)
+  
+  # Step 4: Bind the predictions back to the original data
+  combined_data <- dplyr::bind_cols(original_data, pred_df)
+  
+  # Step 5: Select date and prediction columns
+  combined_data <- combined_data %>%
+    select(datetime, pred)
+  
+  # Step 6: Convert datetime to date and round to weeks and months
+  combined_data <- combined_data %>%
+    mutate(datetime = as.Date(datetime),
+           month = floor_date(datetime, "month"),
+           week = floor_date(datetime, "week"))
+  
+  # Step 7: Plot the predictions
+  plot <- ggplot(combined_data, aes(x = week, y = pred)) +
+    geom_col(fill = "#008080") +
+    labs(title = "Predicted Energy Generation in KWh",
+         x = "Time in Weeks", 
+         y = "Energy (KWh)")
+  
+  # Return both the dataset with predictions and the plot
+  return(list(predicted_data = combined_data, prediction_plot = plot))
+}
+
+# usage:
+# result <- predict_solar_energy(final.model, W_DC_WDdata.dmmy_DF1[-1], W_DC_WDdata.dmmy_DF1)
+# result$prediction_plot
+# result$predicted_data
+
+```
+
+
+```{r}
+##Washington DC weather data - Importing and pre-processing 
+
+#importing Washington DC weather data 
+WashingtonDC_WDdata <- read.csv("Washington dc 2022-01-01 to 2022-12-31.csv")
+
+#Selecting the appropriate columns and making dummy variables 
+WashingtonDC_WDdata.slct <- WashingtonDC_WDdata %>%
+  select(datetime, tempmax, tempmin, temp, 
+          feelslike, precip,snow, snowdepth,windspeed,winddir, 
+          windgust, visibility, cloudcover, humidity, conditions )
+
+#dealing with missing variables
+NA_valuesWdc <- WashingtonDC_WDdata.slct %>%
+  miss_var_summary()
+
+#imputing NA values
+W_DC_WDdata.slct.temp <- mice(WashingtonDC_WDdata.slct,m=3, 
+                              maxit=50, 
+                              meth='rf', 
+                              seed=400, 
+                              printFlag = FALSE)
+W_DC_WDdata.slct <- complete(W_DC_WDdata.slct.temp,1)
+
+#dummy variables for conditions : one hot encoding
+W_DC_WDdata.dmmy <- dummy_cols(W_DC_WDdata.slct, 
+                                         select_columns = 'conditions')
+
+# Remove columns using select
+W_DC_WDdata.dmmy_DF <- W_DC_WDdata.dmmy %>% select(-c(conditions,
+                                                      conditions_Overcast))
+
+#Rename the columns to match training data 
+
+W_DC_WDdata.dmmy_DF1 <- W_DC_WDdata.dmmy_DF %>% 
+        rename( 
+          "Maximum.Temperature" = "tempmax",
+          "Minimum.Temperature"= "tempmin",
+          "Temperature" = "temp",
+          "Heat.Index" = "feelslike",
+          "Precipitation" = "precip",
+          "Snow" = "snow",
+          "Snow.Depth"= "snowdepth",
+          "Wind.Speed"= "windspeed",
+          "Wind.Direction" = "winddir",
+          "Wind.Gust" = "windgust",
+          "Visibility" = "visibility",
+          "Cloud.Cover" = "cloudcover",
+          "Relative.Humidity" = "humidity",
+          "Conditions_Clear" = "conditions_Clear",
+          "Cond_Partially_cloudy" = "conditions_Partially cloudy",
+          "Conditions_Rain"= "conditions_Rain, Overcast",
+          "Cond_Rain_Partially_cloudy" = "conditions_Rain, Partially cloudy",
+          "Conditions_Snow" = "conditions_Snow, Rain, Overcast",
+          "Cond_Snow_Partially_cloudy" = "conditions_Snow, Rain, Partially cloudy")
+
+```
+
+
+```{r}
+
+#Washington DC Solar energy predictions and plot 
+WDCresult <- predict_solar_energy(final.model, 
+                                  W_DC_WDdata.dmmy_DF1[-1], 
+                                  W_DC_WDdata.dmmy_DF1)
+WDCresult$prediction_plot
+WDCresult$predicted_data
+```
+
+```{r}
+#importing  and pre processing Texas weather data 
+Texas_WDdata <- read.csv("texas 2022-01-01 to 2022-12-31.csv")
+
+#Selecting the appropriate columns and making dummy variables 
+Texas_WDdata.slct <- Texas_WDdata %>%
+  select(datetime, tempmax, tempmin, temp, 
+          feelslike, precip,snow, snowdepth,windspeed,winddir, 
+          windgust, visibility, cloudcover, humidity, conditions )
+
+#dealing with missing variables
+NA_valuesTx <- Texas_WDdata.slct %>%
+  miss_var_summary()
+
+#imputing NA values
+Texas_WDdata.slct.temp <- mice(Texas_WDdata.slct,
+                               m=3, 
+                               maxit=50, 
+                               meth='rf', 
+                               seed=400, 
+                               printFlag = FALSE)
+
+W_Tx_WDdata.slct <- complete(Texas_WDdata.slct.temp,1)
+
+#dummy variables for conditions : one hot encoding
+W_Tx_WDdata.slct.dmmy <- dummy_cols(W_Tx_WDdata.slct, 
+                                         select_columns = 'conditions')
+
+# Remove columns using select
+W_Tx_WDdata.slct.dmmy_DF <- W_Tx_WDdata.slct.dmmy %>% 
+  select(-c(conditions,conditions_Overcast))
+
+#Rename the columns to match training data 
+W_Tx_WDdata.slct.dmmy_DF1 <- W_Tx_WDdata.slct.dmmy_DF %>% 
+        rename( 
+          "Maximum.Temperature" = "tempmax",
+          "Minimum.Temperature"= "tempmin",
+          "Temperature" = "temp",
+          "Heat.Index" = "feelslike",
+          "Precipitation" = "precip",
+          "Snow" = "snow",
+          "Snow.Depth"= "snowdepth",
+          "Wind.Speed"= "windspeed",
+          "Wind.Direction" = "winddir",
+          "Wind.Gust" = "windgust",
+          "Visibility" = "visibility",
+          "Cloud.Cover" = "cloudcover",
+          "Relative.Humidity" = "humidity",
+          "Conditions_Clear" = "conditions_Clear",
+          "Cond_Partially_cloudy" = "conditions_Partially cloudy",
+          "Conditions_Rain"= "conditions_Rain, Overcast",
+          "Cond_Rain_Partially_cloudy" = "conditions_Rain, Partially cloudy",
+          "Conditions_Snow" = "conditions_Snow, Rain, Overcast",
+          "Cond_Snow_Partially_cloudy" = "conditions_Snow, Rain, Partially cloudy")
+
+```
+
+```{r}
+
+#Texas Solar energy predictions and plot 
+TXresult <- predict_solar_energy(final.model,
+                                 W_Tx_WDdata.slct.dmmy_DF1[-1],
+                                 W_Tx_WDdata.slct.dmmy_DF1)
+TXresult$prediction_plot
+TXresult$predicted_data
+
+```
+
+```{r}
+#importing and pre-processing Montana weather data 
+Montana_WDdata <- read.csv("Montana & Minnesota 2022-01-01 to 2022-12-31.csv")
+
+Montana_WDdata <-  Montana_WDdata %>%
+  filter(name == "montana")
+
+#Selecting the appropriate columns and making dummy variables 
+Montana_WDdata.slct <- Montana_WDdata %>%
+  select(datetime, tempmax, tempmin, temp, 
+          feelslike, precip,snow, snowdepth,windspeed,winddir, 
+          windgust, visibility, cloudcover, humidity, conditions )
+
+#dealing with missing variables
+NA_valuesMnt <- Montana_WDdata.slct %>%
+  miss_var_summary()
+
+#imputing NA values
+Montana_WDdata.slct.temp <- mice(Montana_WDdata.slct,m=3, 
+                                 maxit=50, 
+                                 meth='rf', 
+                                 seed=400, 
+                                 printFlag = FALSE)
+
+W_Mnt_WDdata.slct <- complete(Montana_WDdata.slct.temp,1)
+
+#dummy variables for conditions : one hot encoding
+W_Mnt_WDdata.slct.dmmy <- dummy_cols(W_Mnt_WDdata.slct, 
+                                         select_columns = 'conditions')
+
+# Remove columns using select
+W_Mnt_WDdata.slct.dmmy_DF <- W_Mnt_WDdata.slct.dmmy %>% select(-c(conditions,conditions_Overcast))
+
+#Rename the columns to match training data 
+W_Mnt_WDdata.slct.dmmy_DF1 <- W_Mnt_WDdata.slct.dmmy_DF %>% 
+        rename( 
+          "Maximum.Temperature" = "tempmax",
+          "Minimum.Temperature"= "tempmin",
+          "Temperature" = "temp",
+          "Heat.Index" = "feelslike",
+          "Precipitation" = "precip",
+          "Snow" = "snow",
+          "Snow.Depth"= "snowdepth",
+          "Wind.Speed"= "windspeed",
+          "Wind.Direction" = "winddir",
+          "Wind.Gust" = "windgust",
+          "Visibility" = "visibility",
+          "Cloud.Cover" = "cloudcover",
+          "Relative.Humidity" = "humidity",
+          "Conditions_Clear" = "conditions_Clear",
+          "Cond_Partially_cloudy" = "conditions_Partially cloudy",
+          "Conditions_Rain"= "conditions_Rain, Overcast",
+          "Cond_Rain_Partially_cloudy" = "conditions_Rain, Partially cloudy",
+          "Conditions_Snow" = "conditions_Snow, Rain, Overcast",
+          "Cond_Snow_Partially_cloudy" = "conditions_Snow, Rain, Partially cloudy")
+
+
+
+```
+```{r}
+
+#Montana state Solar energy predictions and plot 
+MNTresult <- predict_solar_energy(final.model,
+                                 W_Mnt_WDdata.slct.dmmy_DF1[-1],
+                                 W_Mnt_WDdata.slct.dmmy_DF1)
+MNTresult$prediction_plot
+MNTresult$predicted_data
+
+```
+
+```{r}
+
+#importing and pre processing California  weather data 
+California_WDdata <- read.csv("California & Alabama 2022-01-01 to 2022-12-31.csv")
+California_WDdata <-  California_WDdata %>%
+  filter(name == "California")
+
+#Selecting the appropriate columns and making dummy variables 
+California_WDdata.slct <- California_WDdata %>%
+  select(datetime, tempmax, tempmin, temp, 
+          feelslike, precip,snow, snowdepth,windspeed,winddir, 
+          windgust, visibility, cloudcover, humidity, conditions )
+
+#dealing with missing variables
+NA_valuesCali <- California_WDdata.slct %>%
+  miss_var_summary()
+
+#imputing NA values
+W_Cali_WDdata.slct.temp <- mice(California_WDdata.slct,m=3, 
+                                maxit=50, 
+                                meth='rf', 
+                                seed=200, 
+                                printFlag = FALSE)
+W_Cali_WDdata.slct <- complete(W_Cali_WDdata.slct.temp,1)
+
+#dummy variables for conditions : one hot encoding
+W_Cali_WDdata.dmmy <- dummy_cols(W_Cali_WDdata.slct, 
+                                         select_columns = 'conditions')
+# Remove columns using select
+W_Cali_WDdata.dmmy_DF <- W_Cali_WDdata.dmmy %>% 
+  select(-c(conditions))
+
+#Rename the columns to match training data 
+W_Cali_WDdata.dmmy_DF1 <- W_Cali_WDdata.dmmy_DF %>% 
+        rename( 
+          "Maximum.Temperature" = "tempmax",
+          "Minimum.Temperature"= "tempmin",
+          "Temperature" = "temp",
+          "Heat.Index" = "feelslike",
+          "Precipitation" = "precip",
+          "Snow" = "snow",
+          "Snow.Depth"= "snowdepth",
+          "Wind.Speed"= "windspeed",
+          "Wind.Direction" = "winddir",
+          "Wind.Gust" = "windgust",
+          "Visibility" = "visibility",
+          "Cloud.Cover" = "cloudcover",
+          "Relative.Humidity" = "humidity",
+          "Conditions_Clear" = "conditions_Clear",
+          "Cond_Partially_cloudy" = "conditions_Partially cloudy",
+          "Conditions_Rain"= "conditions_Rain",
+          "Cond_Rain_Partially_cloudy" = "conditions_Rain, Partially cloudy",
+          "Conditions_Snow" = "conditions_Overcast",
+          "Cond_Snow_Partially_cloudy" = "conditions_Rain, Overcast")
+```
+
+
+```{r}
+
+#California state Solar energy predictions and plot 
+Caliresult <- predict_solar_energy(final.model,
+                                 W_Cali_WDdata.dmmy_DF1[-1],
+                                 W_Cali_WDdata.dmmy_DF1)
+Caliresult$prediction_plot
+Caliresult$predicted_data
+
+```
+
+```{r}
+#importing and pre-processing Minnesota weather data 
+Minnesota_WDdata <- read.csv("Montana & Minnesota 2022-01-01 to 2022-12-31.csv")
+Minnesota_WDdata <-  Minnesota_WDdata %>%
+  filter(name == "Minnesota")
+
+#Selecting the appropriate columns and making dummy variables 
+Minnesota_WDdata.slct <- Minnesota_WDdata %>%
+  select(datetime, tempmax, tempmin, temp, 
+          feelslike, precip,snow, snowdepth,windspeed,winddir, 
+          windgust, visibility, cloudcover, humidity, conditions )
+
+#dealing with missing variables
+NA_values_mnst <- Minnesota_WDdata.slct %>%
+  miss_var_summary()
+
+#imputing NA values
+Minnesota_WDdata.slct.temp <- mice(Minnesota_WDdata.slct,
+                                   m=3, 
+                                   maxit=50, 
+                                   meth='rf', 
+                                   seed=400, 
+                                   printFlag = FALSE)
+W_Mnst_WDdata.slct <- complete(Minnesota_WDdata.slct.temp,1)
+
+#dummy variables for conditions : one hot encoding
+W_Mnst_WDdata.slct.dmmy <- dummy_cols(W_Mnst_WDdata.slct, 
+                                         select_columns = 'conditions')
+
+# Remove columns using select
+W_Mnst_WDdata.slct.dmmy_DF <- W_Mnst_WDdata.slct.dmmy %>% select(-c(conditions,conditions_Overcast))
+
+#rename columns to match training data 
+W_Mnst_WDdata.slct.dmmy_DF1 <- W_Mnst_WDdata.slct.dmmy_DF %>% 
+        rename( 
+          "Maximum.Temperature" = "tempmax",
+          "Minimum.Temperature"= "tempmin",
+          "Temperature" = "temp",
+          "Heat.Index" = "feelslike",
+          "Precipitation" = "precip",
+          "Snow" = "snow",
+          "Snow.Depth"= "snowdepth",
+          "Wind.Speed"= "windspeed",
+          "Wind.Direction" = "winddir",
+          "Wind.Gust" = "windgust",
+          "Visibility" = "visibility",
+          "Cloud.Cover" = "cloudcover",
+          "Relative.Humidity" = "humidity",
+          "Conditions_Clear" = "conditions_Clear",
+          "Cond_Partially_cloudy" = "conditions_Partially cloudy",
+          "Conditions_Rain"= "conditions_Rain, Overcast",
+          "Cond_Rain_Partially_cloudy" = "conditions_Rain, Partially cloudy",
+          "Conditions_Snow" = "conditions_Snow, Rain, Overcast",
+          "Cond_Snow_Partially_cloudy" = "conditions_Snow, Rain, Partially cloudy")
+```
+
+```{r}
+#California state Solar energy predictions and plot 
+MnsTresult <- predict_solar_energy(final.model,
+                                 W_Mnst_WDdata.slct.dmmy_DF1[-1],
+                                 W_Mnst_WDdata.slct.dmmy_DF1)
+MnsTresult$prediction_plot
+MnsTresult$predicted_data
+
+```
+
+```{r}
+#importing and pre-processing Alabama  weather data 
+Alabama_WDdata <- read.csv("California & Alabama 2022-01-01 to 2022-12-31.csv")
+Alabama_WDdata <-  Alabama_WDdata %>%
+  filter(name == "Alabama")
+
+#Selecting the appropriate columns and making dummy variables 
+Alabama_WDdata.slct <- Alabama_WDdata %>%
+  select(datetime, tempmax, tempmin, temp, 
+          feelslike, precip,snow, snowdepth,windspeed,winddir, 
+          windgust, visibility, cloudcover, humidity, conditions )
+
+#dealing with missing variables
+NA_valuesAlbm <- Alabama_WDdata.slct %>%
+  miss_var_summary()
+
+#imputing NA values
+W_Albm_WDdata.slct.temp <- mice(Alabama_WDdata.slct,
+                                m=3, 
+                                maxit=50, 
+                                meth='rf', 
+                                seed=200, 
+                                printFlag = FALSE)
+W_Albm_WDdata.slct <- complete(W_Albm_WDdata.slct.temp,1)
+
+#dummy variables for conditions : one hot encoding
+W_Albm_WDdata.dmmy <- dummy_cols(W_Albm_WDdata.slct, 
+                                         select_columns = 'conditions')
+
+# Remove columns using select
+W_Albm_WDdata.dmmy_DF <- W_Albm_WDdata.dmmy %>% 
+  select(-c(conditions))
+
+#Rename the columns to match training data 
+W_Albm_WDdata.dmmy_DF1 <- W_Albm_WDdata.dmmy_DF %>% 
+        rename( 
+          "Maximum.Temperature" = "tempmax",
+          "Minimum.Temperature"= "tempmin",
+          "Temperature" = "temp",
+          "Heat.Index" = "feelslike",
+          "Precipitation" = "precip",
+          "Snow" = "snow",
+          "Snow.Depth"= "snowdepth",
+          "Wind.Speed"= "windspeed",
+          "Wind.Direction" = "winddir",
+          "Wind.Gust" = "windgust",
+          "Visibility" = "visibility",
+          "Cloud.Cover" = "cloudcover",
+          "Relative.Humidity" = "humidity",
+          "Conditions_Clear" = "conditions_Clear",
+          "Cond_Partially_cloudy" = "conditions_Partially cloudy",
+          "Conditions_Rain"= "conditions_Rain",
+          "Cond_Rain_Partially_cloudy" = "conditions_Rain, Partially cloudy",
+          "Conditions_Snow" = "conditions_Overcast",
+          "Cond_Snow_Partially_cloudy" = "conditions_Rain, Overcast")
+```
+
+
+```{r}
+#Alabama state Solar energy predictions and plot 
+ALresult <- predict_solar_energy(final.model,
+                                 W_Albm_WDdata.dmmy_DF1[-1],
+                                 W_Albm_WDdata.dmmy_DF1)
+ALresult$prediction_plot
+ALresult$predicted_data
+
+```
+```{r}
+print(as.data.frame(WDCresult$predicted_data$pred))
+
+```
+
+
+```{r}
+
+#assembling all predicted  data 
+
+DC_kwh2022 <- as.data.frame(WDCresult$predicted_data)
+pred1.KWh <- as.data.frame(TXresult$predicted_data$pred)
+pred2.KWh <- as.data.frame(MNTresult$predicted_data$pred)
+pred3.KWh <- as.data.frame(Caliresult$predicted_data$pred)
+pred4.KWh <- as.data.frame(MnsTresult$predicted_data$pred)
+pred5.KWh <- as.data.frame(ALresult$predicted_data$pred)
+
+Pred_Energy2022  <- dplyr::bind_cols(DC_kwh2022, 
+                                     pred1.KWh,
+                                     pred2.KWh,
+                                     pred3.KWh,
+                                     pred4.KWh,
+                                     pred5.KWh)
+
+Pred_Energy2022DF <- Pred_Energy2022 %>% 
+        rename( 
+          "Washinton.DC" = "pred",
+          "Montana"= "MNTresult$predicted_data$pred",
+          "Texas" = "TXresult$predicted_data$pred",
+          "California" = "Caliresult$predicted_data$pred",
+          "Minnesota" = "MnsTresult$predicted_data$pred",
+          "Alabama" = "ALresult$predicted_data$pred",
+       )
+print(Pred_Energy2022DF)
+
+```
+
+```{r}
+
+Pred_Energy22DF <- Pred_Energy2022DF %>%
+  select(datetime, Washinton.DC, Montana, 
+         Texas, California,
+         Alabama, Minnesota ) 
+
+#melt data frame into long format
+Pred_Engy22DF_lng <- melt(Pred_Energy22DF,  
+                          id.vars = 'datetime', 
+                          variable.name = 'state')
+
+#create  plot for each column in data frame
+ggplot(Pred_Engy22DF_lng, aes(datetime, 
+                              value, 
+                              fill = state)) +
+  geom_area()+
+  facet_grid(state ~ .) +
+  labs(title = "Predicted Daily Energy Production By Satate in 2022",
+       x = "Time in Days", 
+       y = "Energy Kwh" ) +
+  theme(
+    legend.position="bottom")
+```
+
+```{r}
+# Mean daily energy production plot 
+Pred_plotdata <- Pred_Engy22DF_lng %>%
+  group_by(state) %>%
+  mutate(mean_eng = mean(value)) %>%
+  ungroup()
+
+ggplot(Pred_plotdata, aes(x= mean_eng , 
+                          y= reorder(state,mean_eng),
+                          col = state)) +
+  geom_segment(aes(yend = state), 
+               xend = 0, 
+               colour = "grey50") +
+  geom_point(size = 3, 
+             aes(colour = mean_eng)) +
+  labs(title = "Mean Daily Energy Production for the Year 2022",
+       x = "Energy Kwh", 
+       y = "State" ) 
+```
+
+```{r}
+#Median daily energy production 
+Pred_plotdata2 <- Pred_Engy22DF_lng %>%
+  group_by(state) %>%
+  mutate(median_eng = median(value)) %>%
+  ungroup()
+
+ggplot(Pred_plotdata2, aes(x= median_eng , 
+                          y= reorder(state,median_eng),
+                          col = state)) +
+  geom_segment(aes(yend = state), 
+               xend = 0, 
+               colour = "grey50") +
+  geom_point(size = 3, 
+             aes(colour = median_eng)) +
+  labs(title = "Median Daily Energy Production for the Year 2022",
+       x = "Energy Kwh", 
+       y = "State" ) 
+```
+
+```{r}
+#Box plot for the daily energy production 
+# Store the graph
+box_plot <- ggplot(Pred_Engy22DF_lng, 
+                   aes(x = state, 
+                       y = value,  
+                       color = state))
+# Add the geometric object box plot
+box_plot +
+  geom_boxplot(show.legend = FALSE) +
+  coord_flip() +
+  labs(title = "Predicted Energy Production for the Year 2022",
+       x = "Energy Kwh", 
+       y = "State" ) 
+```
+
+
 
