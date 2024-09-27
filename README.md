@@ -62,7 +62,8 @@ For further analysis, We then put together the Mean and the Median Daily Energy 
 
 ![image](https://github.com/user-attachments/assets/519df939-6883-4626-9de0-f78b1db41c8b)
 
-Insights:
+### Insights:
+
 California has the highest predicted yearly mean (19,876.34 KWh) and median (22,279 KWh) energy output among the states listed. 
 This reflects California’s favorable weather conditions for solar energy generation, such as high levels of sunlight and relatively low cloud cover. 
 The significant gap between the mean and median suggests that there may be some extreme high values (outliers) in the dataset. 
